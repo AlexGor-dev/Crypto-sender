@@ -1,0 +1,222 @@
+;; 0x2001 - addMember;
+;; 0x2004 - removeMember;
+;; 0x2002 - addMessage;
+;; 0x2003 - removeMessage;
+
+;; 0x2005 - addToBlackList;
+;; 0x2006 - removeFromBlackList;
+
+_ loadOwnerData(cell owner)
+{
+    (int key, int contractType, slice ownerData) = loadOwner(owner);
+    return (ownerData~load_uint(4), ownerData~load_uint(4), ownerData~load_bits(slice_bits(ownerData)));
+}
+
+(int) loadMsgType(cell owner)
+{
+    (int key, int contractType, slice ownerData) = loadOwner(owner);
+    return ownerData.preload_uint(4);
+}
+
+_ loadOther(cell other)
+{
+    slice data = other.begin_parse();
+    return (data~load_ref(), data~load_ref());
+}
+
+(cell) saveOther(cell members, cell messages)
+{
+    return begin_cell().store_ref(members).store_ref(messages).end_cell();
+}
+
+_ loadMembers(cell members)  inline_ref
+{
+    slice data = members.begin_parse();
+    return (data~load_dict(), data~load_dict());
+}
+
+_ loadMembersMin()  inline_ref
+{
+    (int seqno, cell owner, cell other) = loadData();
+    (cell members, cell messages) = loadOther(other);
+    return loadMembers(members);
+}
+
+(cell) saveMembers(cell memberDict, cell blackList) impure
+{
+    return begin_cell().store_dict(memberDict).store_dict(blackList).end_cell();
+}
+
+_ loadMessages(cell messages)  inline_ref
+{
+    slice data = messages.begin_parse();
+    return (data~load_uint(32), data~load_dict());
+}
+
+(cell) saveMessages(int id, cell messageDict) impure
+{
+    return begin_cell().store_uint(id, 32).store_dict(messageDict).end_cell();
+}
+
+() addMessage(slice sender_addr, slice in_msg) impure
+{
+    (int seqno, cell owner, cell other) = loadData();
+    (cell members, cell messages) = loadOther(other);
+    (cell memberDict, cell blackList) = loadMembers(members);
+
+    slice signature = in_msg~load_bits(512);
+    int pk = in_msg~load_uint(256);
+    int msgTime = in_msg~load_uint(32);
+    cell msgBody = in_msg~load_ref();
+
+    throw_unless(34, check_signature(cell_hash(msgBody), signature, pk));
+
+    (slice cs, int found) = blackList.udict_get?(256, pk);
+    throw_if(41, found);
+    (slice cs, int found) = memberDict.udict_get?(256, pk);
+    ifnot(found)
+    {
+        throw_if(35, loadMsgType(owner) == 1);
+        var (src_wc, src_addr) = parse_std_addr(sender_addr);
+        cell data = begin_cell().store_uint(src_wc, 8).store_uint(src_addr, 256).end_cell();
+        memberDict~udict_set_builder(256, pk, begin_cell().store_ref(data));
+        members = saveMembers(memberDict, blackList);
+    }
+    (int id, cell messageDict) = loadMessages(messages);
+    id += 1;
+    messageDict~udict_set_builder(32, id, begin_cell().store_uint(msgTime, 32).store_uint(pk, 256).store_ref(msgBody));
+    saveData(seqno, owner, saveOther(members, saveMessages(id, messageDict)));
+}
+
+(cell, ()) removeMessage(cell messageDict, int id, int mode) impure
+{
+    int removeNum = 0;
+    if(mode == 0)
+    {
+        do
+        {
+            var (messageDict', i, _, f) = messageDict.udict_delete_get_min(32);
+            f~touch();
+            if (f)
+            {
+                if (i <= id)
+                {
+                    if(removeNum == 0) { accept_message(); }
+                    messageDict = messageDict';
+                    removeNum += 1;
+                }
+            }
+        }
+        until (~ f);
+    }
+    elseif(mode == 1)
+    {
+        var(s, f) = messageDict~udict_delete_get?(32, id);
+        if (f)
+        {
+            accept_message();
+            removeNum += 1;
+        }
+    }
+    elseif(mode == 2)
+    {
+        do
+        {
+            (int mid , slice cs, int f) = messageDict.udict_get_next?(32, -1);
+            if (f)
+            {
+                var(s, i) = messageDict~udict_delete_get?(32, mid);
+                if(removeNum == 0) { accept_message(); }
+                removeNum += 1;
+            }
+        } until (~ f);
+    }
+    throw_unless(38, removeNum);
+    return (messageDict, ());
+}
+
+
+() recv_internal(int amount, cell in_msg_cell, slice in_msg) impure
+{
+    var cs = in_msg_cell.begin_parse();
+    var flags = cs~load_uint(4);
+    if (flags & 1) { return (); }
+    if (in_msg.slice_empty?()) { return (); }
+    int action = in_msg~load_uint(32);
+    if(action == 0x2002)
+    {
+        slice sender_addr = cs~load_msg_addr();
+        addMessage(sender_addr, in_msg);
+        return sendMessage(sender_addr, 0xffffffff, 0, 64);
+    }
+}
+
+() recv_external(slice in_msg) impure
+{
+    (int seqno, int action, cell owner, cell other, slice cs) = default_external(in_msg);
+    if(action != -1)
+    {
+        (cell members, cell messages) = loadOther(other);
+
+        if (action == 0x2003);;removeMessage;
+        {
+            (int lastID, cell messageDict) = loadMessages(messages);
+            slice data = cs~load_ref().begin_parse();
+            messageDict~removeMessage(data~load_uint(32), data~load_uint(2));
+            messages = saveMessages(lastID, messageDict);
+        }
+        elseif (action == 0x2001);;addMember;
+        {
+            (cell memberDict, cell blackList) = loadMembers(members);
+            slice data = cs~load_ref().begin_parse();
+            if(data~load_uint(1) == 0) { memberDict~add_throw(data~load_ref().begin_parse(), 256); }
+            else { blackList~add_throw(data~load_ref().begin_parse(), 256); }
+            members = saveMembers(memberDict, blackList);
+        }
+        elseif (action == 0x2004);;removeMember;
+        {
+            (cell memberDict, cell blackList) = loadMembers(members);
+            slice data = cs~load_ref().begin_parse();
+            if(data~load_uint(1) == 0) { memberDict~remove_throw(data~load_uint(256), 256); }
+            else { blackList~remove_throw(data~load_uint(256), 256); }
+            members = saveMembers(memberDict, blackList);
+        }
+        else
+        {
+            throw_if(32, 3);
+        }
+        saveData(seqno + 1, owner, saveOther(members, messages));
+    }
+}
+
+(int, slice, int) getMember(int id) method_id
+{
+    (cell memberDict, cell blackList) = loadMembersMin();
+    (id, slice cs, int f) = memberDict.udict_get_next?(256, id);
+    if (f)
+    {
+        (_, int inBlackList) = blackList.udict_get?(256, id);
+        return (id, cs, inBlackList);
+    }
+    return (-1, begin_cell().end_cell().begin_parse(), 0);
+}
+
+(int) isMemberInBlackList(int id) method_id
+{
+    (cell memberDict, cell blackList) = loadMembersMin();
+    (_, int inBlackList) = blackList.udict_get?(256, id);
+    return (inBlackList);
+}
+
+(int, slice) getMessage(int id) method_id
+{
+    (int seqno, cell owner, cell other) = loadData();
+    (cell members, cell messages) = loadOther(other);
+    (int lastID, cell messageDict) = loadMessages(messages);
+    (id, slice cs, int f) = messageDict.udict_get_next?(32, id);
+    if (f)
+    {
+        return (id, cs);
+    }
+    return (-1, begin_cell().end_cell().begin_parse());
+}

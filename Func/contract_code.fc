@@ -1,0 +1,155 @@
+;; 0x1001 - create;
+;; 0x1002 - sendMessage;
+;; 0x1003 - changeCode;
+;; 0x1004 - changeOwner
+
+_ loadData()  inline_ref
+{
+    slice data = get_data().begin_parse();
+    return (data~load_uint(32), data~load_ref(), data~load_ref());
+}
+
+_ loadMinData()  inline_ref
+{
+    slice data = get_data().begin_parse();
+    return (data~load_uint(32), data~load_ref());
+}
+
+_ loadOwner(cell owner)  inline_ref
+{
+    slice data = owner.begin_parse();
+    return (data~load_uint(256), data~load_uint(8), data~load_ref().begin_parse());
+}
+
+() saveData(int seqno, cell owner, cell other) impure
+{
+    set_data(
+    begin_cell()
+    .store_uint(seqno, 32)
+    .store_ref(owner)
+    .store_ref(other)
+    .end_cell());
+}
+
+() sendMessage(addr, action, grams, mode) impure
+{
+    var msg = begin_cell()
+    .store_uint(0x18, 6)
+    .store_slice(addr)
+    .store_grams(grams)
+    .store_uint(0, 1 + 4 + 4 + 64 + 32 + 1 + 1)
+    .store_uint(action, 32);
+    return send_raw_message(msg.end_cell(), mode);
+}
+
+(cell, int) add(cell dict, slice data, int bits) impure
+{
+    int pk = data~load_uint(bits);
+    (slice cs, int found) = dict.udict_get?(bits, pk);
+    ifnot(found)
+    {
+        dict~udict_set_builder(bits, pk, begin_cell().store_ref(data~load_ref()));
+        return (dict, 1);
+    }
+    return (dict, 0);
+}
+
+(cell, int) remove(cell dict, int id, int bits) impure
+{
+    var(s, f) = dict~udict_delete_get?(bits, id);
+    if (f) { return (dict, 1); }
+    return (dict, 0);
+}
+
+(cell, ()) add_throw(cell dict, slice data, int bits) impure
+{
+    int added = dict~add(data, bits);
+    throw_unless(38, added);
+    accept_message();
+    return (dict, ());
+}
+
+(cell, ()) remove_throw(cell dict, int id, int bits) impure
+{
+    int removed = dict~remove(id, bits);
+    throw_unless(38, removed);
+    accept_message();
+    return (dict, ());
+}
+
+(int, int, cell, cell, slice) default_external(slice in_msg) impure
+{
+    slice signature = in_msg~load_bits(512);
+    cell msgCell = in_msg~load_ref();
+
+    (int seqno, cell owner, cell other) = loadData();
+    throw_unless(34, check_signature(cell_hash(msgCell), signature, owner.begin_parse().preload_uint(256)));
+
+    slice cs = msgCell.begin_parse();
+    int nseqno = cs~load_uint(32);
+    throw_if(26, nseqno != seqno);
+
+    int action = cs~load_uint(32);
+
+    int exit = 0;
+    if(action == 0x1002);;sendMessage
+    {
+        slice msg = cs~load_ref().begin_parse();
+        int mode = msg~load_uint(8);
+        send_raw_message(msg~load_ref(), mode);
+    }
+    elseif(action == 0x1003);;changeCode
+    {
+        set_code(cs~load_ref());
+    }
+    elseif(action == 0x1004);;changeOwner
+    {
+        owner = cs~load_ref();
+    }
+    elseif(action == 0x1005);;changeOther
+    {
+        other = cs~load_ref();
+    }
+    elseif(action == 0x1001);;create
+    {
+
+    }
+    else
+    {
+        exit = 1;
+    }
+    if(exit == 0)
+    {
+        accept_message();
+        saveData(seqno + 1, owner, other);
+        action = -1;
+    }
+
+    return (seqno, action, owner, other, cs);
+}
+
+(int, cell, cell) getData() method_id
+{
+    return loadData();
+}
+
+int getSeqno() method_id
+{
+  return get_data().begin_parse().preload_uint(32);
+}
+
+(int, cell) getOwner() method_id
+{
+    return loadMinData();
+}
+
+cell getOther() method_id
+{
+    (int seqno, cell owner, cell other) = loadData();
+    return other;
+}
+
+
+
+
+
