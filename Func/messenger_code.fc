@@ -66,7 +66,6 @@ _ loadMessages(cell messages)  inline_ref
 
     slice signature = in_msg~load_bits(512);
     int pk = in_msg~load_uint(256);
-    int msgTime = in_msg~load_uint(32);
     cell msgBody = in_msg~load_ref();
 
     throw_unless(34, check_signature(cell_hash(msgBody), signature, pk));
@@ -84,7 +83,7 @@ _ loadMessages(cell messages)  inline_ref
     }
     (int id, cell messageDict) = loadMessages(messages);
     id += 1;
-    messageDict~udict_set_builder(32, id, begin_cell().store_uint(msgTime, 32).store_uint(pk, 256).store_ref(msgBody));
+    messageDict~udict_set_builder(32, id, begin_cell().store_uint(pk, 256).store_ref(msgBody));
     saveData(seqno, owner, saveOther(members, saveMessages(id, messageDict)));
 }
 
